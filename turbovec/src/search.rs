@@ -339,24 +339,34 @@ unsafe fn search_multi_query_avx2(
                     }
                 }
             } else {
-                // Scalar prune over the already-computed f32 scores. (The old
-                // AVX2 `_mm256_cmp_ps` + `movemask` chunk-skip was a perf
-                // shortcut; dropping it keeps top-k identical — the SUB-trick
-                // scoring above is what moved onto ndarray::simd. Perf
-                // comparison lives on a separate branch per the integration scope.)
-                for lane in 0..(end - base_vec) {
-                    if let Some(m) = mask {
-                        if !mask_allows(m, base_vec + lane) { continue; }
+                // SIMD threshold-prune: skip any 8-lane score chunk that holds
+                // no candidate above the current heap-min in a single op, via
+                // ndarray::simd `F32x8::cmp_gt_mask` — the polyfill equivalent of
+                // upstream's `_mm256_cmp_ps` + `_mm256_movemask_ps` early-out.
+                let hmin_v = F32x8::splat(*hmin);
+                for chunk in 0..4 {
+                    let chunk_start = chunk * 8;
+                    if chunk_start >= end - base_vec {
+                        break;
                     }
-                    let score = block_out[lane];
-                    if score > *hmin {
-                        hs[*hmi] = score;
-                        hi[*hmi] = (base_vec + lane) as u32;
-                        *hmi = 0;
-                        for h in 1..k {
-                            if hs[h] < hs[*hmi] { *hmi = h; }
+                    if F32x8::from_slice(&block_out[chunk_start..]).cmp_gt_mask(hmin_v) == 0 {
+                        continue;
+                    }
+                    let chunk_end = (chunk_start + 8).min(end - base_vec);
+                    for lane in chunk_start..chunk_end {
+                        if let Some(m) = mask {
+                            if !mask_allows(m, base_vec + lane) { continue; }
                         }
-                        *hmin = hs[*hmi];
+                        let score = block_out[lane];
+                        if score > *hmin {
+                            hs[*hmi] = score;
+                            hi[*hmi] = (base_vec + lane) as u32;
+                            *hmi = 0;
+                            for h in 1..k {
+                                if hs[h] < hs[*hmi] { *hmi = h; }
+                            }
+                            *hmin = hs[*hmi];
+                        }
                     }
                 }
             }
