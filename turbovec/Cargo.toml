@@ -38,8 +38,12 @@ default = []
 # self-contained. `build.rs` emits the link directive only under this feature.
 blas = ["ndarray/blas"]
 
-# Expose the internal kernel-dispatch toggle (FORCE_SCALAR_FALLBACK) outside
-# `cfg(test)` so the benchmark can measure the scalar-reference floor against
-# the SIMD native kernel and the ndarray::simd polyfill.
+# Expose the internal kernel-dispatch toggles (FORCE_SCALAR_FALLBACK,
+# FORCE_AVX2_PATH) outside `cfg(test)` so the kernel_speed example can force
+# each scoring path (native AVX-512 / migrated AVX2 / scalar) for measurement.
 bench-internals = []
+
+[[example]]
+name = "kernel_speed"
+required-features = ["bench-internals"]
 
