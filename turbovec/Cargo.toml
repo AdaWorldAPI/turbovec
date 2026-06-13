@@ -2,7 +2,7 @@
 name = "turbovec"
 version = "0.9.0"
 edition = "2021"
-rust-version = "1.70"
+rust-version = "1.95"
 description = "Fast vector quantization with 2-4 bit compression and SIMD search"
 license = "MIT"
 repository = "https://github.com/RyanCodrai/turbovec"
@@ -12,7 +12,15 @@ keywords = ["vector-search", "quantization", "nearest-neighbor", "ann", "simd"]
 categories = ["algorithms", "science", "compression"]
 
 [dependencies]
-ndarray = "0.17"
+# AdaWorldAPI fork of ndarray (workspace P0: depend on the fork, NEVER the
+# crates.io upstream). The fork IS rust-ndarray 0.17.2 with HPC/SIMD modules
+# bolted on, so the core array API (`ArrayView2`, `.dot()`, `.t()`) is
+# unchanged AND `ndarray::simd::*` (the SIMD polyfill) becomes available to
+# the search kernel. We pull only the core array layer + simd: the one
+# `.dot()` in `encode.rs` uses the pure-Rust `matrixmultiply` fallback unless
+# the `blas` feature is enabled, so no OpenBLAS/Accelerate link is required by
+# default.
+ndarray = { path = "../../ndarray", default-features = false, features = ["std"] }
 rayon = "1.10"
 ordered-float = "4"
 rand = "0.8"
@@ -21,12 +29,27 @@ rand_distr = "0.4"
 statrs = "0.17"
 faer = "0.20"
 
-# build.rs emits the BLAS link directive directly (openblas on Linux,
-# Accelerate framework on macOS) so downstream binaries don't need to
-# include `extern crate blas_src;` to resolve `cblas_sgemm`.
-[target.'cfg(target_os = "macos")'.dependencies]
-ndarray = { version = "0.17", features = ["blas"] }
+[features]
+default = []
 
-[target.'cfg(target_os = "linux")'.dependencies]
-ndarray = { version = "0.17", features = ["blas"] }
+# Re-enable C-BLAS (OpenBLAS on Linux, Accelerate on macOS) for the
+# encode-time rotation GEMM. OFF by default — the pure-Rust matrixmultiply
+# fallback needs no native library, which keeps `cargo build`/`test`/`bench`
+# self-contained. `build.rs` emits the link directive only under this feature.
+blas = ["ndarray/blas"]
+
+# Route the search scan through `ndarray::simd` (the polyfill) instead of
+# turbovec's hand-written intrinsics. Compiles `search_polyfill` ALONGSIDE the
+# native kernel so the benchmark can run them head-to-head. See
+# `benches/kernel_speed.rs`.
+ndarray-simd = []
+
+# Expose the internal kernel-dispatch toggle (FORCE_SCALAR_FALLBACK) outside
+# `cfg(test)` so the benchmark can measure the scalar-reference floor against
+# the SIMD native kernel and the ndarray::simd polyfill.
+bench-internals = []
+
+[[example]]
+name = "kernel_speed"
+required-features = ["ndarray-simd", "bench-internals"]
 

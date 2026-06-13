@@ -27,9 +27,9 @@ pub static BLOCKS_SKIPPED_BY_MASK: AtomicU64 = AtomicU64::new(0);
 /// fallback even when AVX2/AVX-512 is available, so tests can exercise
 /// `score_query_into_heap` on hardware that would otherwise always pick a
 /// SIMD kernel. Compiled only under `cfg(test)` — zero cost in release.
-#[cfg(test)]
+#[cfg(any(test, feature = "bench-internals"))]
 #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
-pub(crate) static FORCE_SCALAR_FALLBACK: std::sync::atomic::AtomicBool =
+pub static FORCE_SCALAR_FALLBACK: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
 /// Current value of the block-skip counter. See [`BLOCKS_SKIPPED_BY_MASK`].
@@ -884,8 +884,13 @@ unsafe fn avx2_post_flush_heap_update(
 /// for one block and runs combine + convert + fmadd + norm-mul + heap update
 /// for each query. Mirrors the inline epilogue inside `search_multi_query_avx2`
 /// byte-for-byte so scores are bit-identical.
+// Pre-existing upstream kernel helper, currently unreferenced (the AVX-512BW
+// path uses `avx2_post_flush_heap_update` + `avx2_batch_flush_to_fa`). Retained
+// verbatim from turbovec upstream and silenced rather than deleted, to keep the
+// vendored kernel a minimal diff from the source crate.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2", enable = "fma")]
+#[allow(dead_code, unused_variables)]
 unsafe fn avx2_block_epilogue(
     accus: &mut [[std::arch::x86_64::__m256i; 4]; 4],
     base_vec: usize,
@@ -1448,7 +1453,7 @@ fn score_query_into_heap(
 /// (the search kernel folds this into the per-query bias). When the index
 /// has no calibration (v2 file, lazy index with no add), returns the
 /// queries unchanged and zero bias corrections.
-fn calibrate_queries(
+pub(crate) fn calibrate_queries(
     q_rot: &[f32],
     tqplus_shift: &[f32],
     tqplus_scale: &[f32],
@@ -1731,10 +1736,10 @@ pub fn search(
                 let mut heap_mins = vec![f32::NEG_INFINITY; batch_nq];
                 let mut heap_min_idxs = vec![0usize; batch_nq];
 
-                #[cfg(test)]
+                #[cfg(any(test, feature = "bench-internals"))]
                 let force_scalar =
                     FORCE_SCALAR_FALLBACK.load(std::sync::atomic::Ordering::Relaxed);
-                #[cfg(not(test))]
+                #[cfg(not(any(test, feature = "bench-internals")))]
                 let force_scalar = false;
 
                 unsafe {
