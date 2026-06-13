@@ -245,12 +245,17 @@ unsafe fn search_multi_query_avx2(
 
             for g in g_start..g_end {
                 let off = (b * n_byte_groups + g) * BLOCK;
-                let codes_v = U8x32::from_slice(&blocked_codes[off..]);
+                // SAFETY: `off + 32 <= blocked_codes.len()` (off is g-indexed within
+                // this block's `n_byte_groups * BLOCK` region) and `g*32 + 32 <=
+                // luts[qi].len()` by the LUT-build contract — both proven in range,
+                // so the unchecked from_ptr load is sound. This is the hot loop;
+                // from_slice's bounds checks were the migration's ~17% AVX2 tax.
+                let codes_v = unsafe { U8x32::from_ptr(blocked_codes.as_ptr().add(off)) };
                 let clo = codes_v & nibble_mask;
                 let chi = codes_v.shr_epi16(4) & nibble_mask;
 
                 for qi in 0..4 {
-                    let lut = U8x32::from_slice(&luts[qi][g * 32..]);
+                    let lut = unsafe { U8x32::from_ptr(luts[qi].as_ptr().add(g * 32)) };
                     let res0 = lut.shuffle_bytes(clo);
                     let res1 = lut.shuffle_bytes(chi);
                     accus[qi][0] = accus[qi][0] + res0.as_u16x16();
