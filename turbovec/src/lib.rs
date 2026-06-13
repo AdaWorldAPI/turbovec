@@ -52,13 +52,6 @@ pub mod pack;
 pub mod rotation;
 pub mod search;
 
-/// Polyfill scoring path (int8 GEMM via `ndarray::simd::matmul_i8_to_i32`),
-/// compiled alongside the native kernel for head-to-head benchmarking.
-/// See `benches/kernel_speed.rs`. Routes ALL SIMD through `ndarray::simd`
-/// so AMX/VNNI/scalar dispatch lives in ndarray, not here.
-#[cfg(feature = "ndarray-simd")]
-pub mod search_polyfill;
-
 pub use error::{AddError, ConstructError};
 pub use id_map::IdMapIndex;
 
