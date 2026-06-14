@@ -1,0 +1,8 @@
+[toolchain]
+# Pinned to 1.95.0 to match the AdaWorldAPI ndarray fork (its own
+# rust-toolchain.toml + `rust-version = "1.95"`). turbovec path-depends on
+# that fork (see turbovec/Cargo.toml), so the active toolchain here must be
+# >= 1.95 or the fork refuses to compile. Bump explicitly in lockstep with
+# ndarray; never auto-track `stable`.
+channel = "1.95.0"
+components = ["clippy", "rustfmt"]
