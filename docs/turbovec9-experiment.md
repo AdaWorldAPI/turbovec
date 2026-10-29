@@ -8,8 +8,9 @@ change retrieval quality, scalar scan cost, and storage?
 
 ## Ground rules
 
-- Use this fork's `turbovec::codebook::codebook(bits, dim)` and
-  `rotation::Rotation::new(dim)`. No second codebook algorithm.
+- Use upstream's `turbovec::expected_codebook(4, dim)` and the
+  feature-gated `turbovec::codebook::lab_codebook9(dim)` (same Lloyd-Max
+  implementation), plus `rotation::Rotation::new(dim)`. No second codebook algorithm.
 - Codes are **unsigned centroid indices** 0..511, stored in nine bit planes,
   using `u16` during packing. Every code is a numeric centroid, *not*
   `ndarray::hpc::codec9`'s DR512 P×M / never-touched encoding.
