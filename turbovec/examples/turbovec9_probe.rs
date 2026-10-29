@@ -5,10 +5,12 @@
 //! The 9-bit code is a 0..511 Lloyd-Max centroid ID, NOT ndarray Codec9's
 //! DR512 presence/polarity encoding.
 //!
-//! From the AdaWorldAPI/turbovec checkout with sibling ../ndarray:
-//!   cargo test -p turbovec --release --example turbovec9_probe
-//!   cargo run -p turbovec --release --example turbovec9_probe
-//! Environment overrides: TV9_N, TV9_NQ, TV9_DIM, TV9_K, TV9_REPEATS.
+//! From the standalone AdaWorldAPI/turbovec checkout:
+//!   cargo test --release -p turbovec --features turbovec9-lab --example turbovec9_probe
+//!   cargo run --release -p turbovec --features turbovec9-lab --example turbovec9_probe
+//!   TV9_WORKLOAD=graph cargo run --release -p turbovec --features turbovec9-lab --example turbovec9_probe
+//! Environment overrides: TV9_N, TV9_NQ, TV9_DIM, TV9_K, TV9_REPEATS,
+//! TV9_WORKLOAD, TV9_NOISE (only for the graph workload).
 
 use std::hint::black_box;
 use std::time::Instant;
@@ -171,11 +173,125 @@ fn recall(found: &[usize], truth: &[usize]) -> f64 {
     hits as f64 / truth.len().max(1) as f64
 }
 
+/// Graph-regularization **input** probe: each group of four database
+/// vectors is an explicit ground-truth neighborhood, independent of the
+/// retrieval encoder. A query is a separate noisy observation of one group.
+/// This measures neighbor selection only, NOT backprop/training accuracy.
+fn graph_vectors(n: usize, nq: usize, dim: usize, noise: f32) -> (Vec<f32>, Vec<f32>) {
+    assert!(n >= 4 && n % 4 == 0 && nq > 0 && dim % 8 == 0);
+    assert!(noise >= 0.0 && noise.is_finite());
+    let groups = n / 4;
+    let centers = unit_vectors(groups, dim, 0xD0C);
+    let perturb_db = unit_vectors(n, dim, 0xBAD);
+    let perturb_q = unit_vectors(nq, dim, 0xF00);
+    let mut db = vec![0.0; n * dim];
+    let mut queries = vec![0.0; nq * dim];
+    fn mix(dst: &mut [f32], center: &[f32], jitter: &[f32], noise: f32) {
+        let mut norm = 0f64;
+        for d in 0..dst.len() {
+            dst[d] = center[d] + noise * jitter[d];
+            norm += (dst[d] as f64) * (dst[d] as f64);
+        }
+        let inv = norm.sqrt().recip() as f32;
+        for x in dst { *x *= inv; }
+    }
+    for row in 0..n {
+        let group = row / 4;
+        mix(
+            &mut db[row * dim..(row + 1) * dim],
+            &centers[group * dim..(group + 1) * dim],
+            &perturb_db[row * dim..(row + 1) * dim],
+            noise,
+        );
+    }
+    for q in 0..nq {
+        let group = q % groups;
+        mix(
+            &mut queries[q * dim..(q + 1) * dim],
+            &centers[group * dim..(group + 1) * dim],
+            &perturb_q[q * dim..(q + 1) * dim],
+            noise,
+        );
+    }
+    (db, queries)
+}
+
+/// Independent explicit graph: group q%groups has exactly four edges.
+/// "hit" means any graph edge appears in top-k, "coverage" counts all four.
+fn graph_edges_at_k(found: &[usize], query: usize, groups: usize) -> (bool, f64) {
+    let group = query % groups;
+    let relevant = (group * 4)..(group * 4 + 4);
+    let hits = found.iter().filter(|&&i| relevant.contains(&i)).count();
+    (hits > 0, hits as f64 / 4.0)
+}
+
+fn run_graph_probe() {
+    let n = env_usize("TV9_N", 512);
+    let nq = env_usize("TV9_NQ", 64);
+    let dim = env_usize("TV9_DIM", 64);
+    let k = env_usize("TV9_K", 10).min(n);
+    let noise: f32 = std::env::var("TV9_NOISE")
+        .ok().and_then(|s| s.parse().ok()).unwrap_or(1.7);
+    assert!(n >= 4 && n % 4 == 0 && dim > 0 && dim % 8 == 0 && nq > 0 && k > 0);
+    let (db, queries) = graph_vectors(n, nq, dim, noise);
+    let groups = n / 4;
+    let rotation = Rotation::new(dim);
+    let i4 = ScalarTurbo::encode(&db, dim, 4, &rotation).expect("4-bit");
+    let i9 = ScalarTurbo::encode(&db, dim, 9, &rotation).expect("9-bit");
+    let mut prod4 = TurboQuantIndex::new(dim, 4).expect("shipped 4-bit");
+    prod4.add(&db);
+    prod4.prepare();
+    let truth: Vec<Vec<usize>> = queries.chunks_exact(dim)
+        .map(|q| exact_topk(&db, q, dim, k)).collect();
+
+    println!("TurboVec9 GRAPH-LAB | n={n} dim={dim} queries={nq} k={k} noise={noise} | 4 labeled positives/group");
+    println!("METRICS: topk_recall_f32 / graph_any_positive@k / graph_edge_coverage@k");
+    for (name, bits, search) in [
+        ("f32-exact", 32usize, 0usize),
+        ("scalar-i4", 4, 1),
+        ("scalar-i9", 9, 2),
+        ("shipped-i4", 4, 3),
+    ] {
+        let mut recall_sum = 0.0f64;
+        let mut hit_sum = 0usize;
+        let mut edge_sum = 0.0f64;
+        let t = Instant::now();
+        // This loop is the same for all encoders; production search
+        // includes its own per-query dispatch and index lookup.
+        for (qi, query) in queries.chunks_exact(dim).enumerate() {
+            let top = match search {
+                0 => exact_topk(&db, query, dim, k),
+                1 => i4.topk(query, &rotation, k),
+                2 => i9.topk(query, &rotation, k),
+                _ => prod4.search(query, k).indices_for_query(0)
+                    .iter().map(|&i| i as usize).collect(),
+            };
+            recall_sum += recall(&top, &truth[qi]);
+            let (hit, coverage) = graph_edges_at_k(&top, qi, groups);
+            hit_sum += hit as usize;
+            edge_sum += coverage;
+        }
+        println!(
+            "{name:10} payload={:4} B/vector recall_f32@{k}={:.5} graph_any@{k}={:.5} graph_coverage@{k}={:.5} query={:.1} us",
+            if search == 0 { dim * 4 } else { row_bytes(dim, bits) },
+            recall_sum / nq as f64,
+            hit_sum as f64 / nq as f64,
+            edge_sum / nq as f64,
+            t.elapsed().as_secs_f64() * 1e6 / nq as f64,
+        );
+    }
+    println!("Interpretation: neighbor-selection proxy only; no NSL graph loss/gradient/training run.");
+}
+
 fn env_usize(name: &str, default: usize) -> usize {
     std::env::var(name).ok().and_then(|s| s.parse().ok()).unwrap_or(default)
 }
 
 fn main() {
+    if std::env::var("TV9_WORKLOAD").ok().as_deref() == Some("graph") {
+        run_graph_probe();
+        return;
+    }
     let n = env_usize("TV9_N", 512);
     let nq = env_usize("TV9_NQ", 32);
     let dim = env_usize("TV9_DIM", 64);
@@ -275,6 +391,32 @@ mod tests {
         let top = index.topk(&db[..dim], &rotation, 5);
         assert_eq!(top.len(), 5);
         assert!(top.iter().all(|&id| id < 24));
+    }
+
+    #[test]
+    fn four_explicit_graph_edges_and_query_groups_are_stable() {
+        let (db, q) = graph_vectors(24, 7, 32, 1.7);
+        assert_eq!(db.len(), 24 * 32);
+        assert_eq!(q.len(), 7 * 32);
+        assert_eq!(graph_edges_at_k(&[0, 3, 8], 0, 6), (true, 0.5));
+        assert_eq!(graph_edges_at_k(&[0, 3, 8], 1, 6), (false, 0.0));
+        assert_eq!(graph_edges_at_k(&[0, 3, 8], 6, 6), (true, 0.5));
+    }
+
+    #[test]
+    fn graph_probe_retrieval_has_valid_metrics_and_no_duplicate_ids() {
+        let (db, queries) = graph_vectors(32, 5, 32, 1.7);
+        let r = Rotation::new(32);
+        let ix = ScalarTurbo::encode(&db, 32, 9, &r).unwrap();
+        for (i, query) in queries.chunks_exact(32).enumerate() {
+            let top = ix.topk(query, &r, 10);
+            assert_eq!(top.len(), 10);
+            let unique: std::collections::BTreeSet<usize> = top.iter().copied().collect();
+            assert_eq!(unique.len(), top.len());
+            let (hit, coverage) = graph_edges_at_k(&top, i, 8);
+            assert_eq!(hit, coverage > 0.0);
+            assert!((0.0..=1.0).contains(&coverage));
+        }
     }
 
     #[test]

@@ -7,6 +7,7 @@ on:
       - "turbovec/Cargo.toml"
       - "turbovec/src/codebook.rs"
       - "docs/turbovec9-experiment.md"
+      - "docs/turbovec9-learning-neighbor-probe.md"
       - ".github/workflows/turbovec9-lab.yml"
 
 permissions:
@@ -54,6 +55,21 @@ jobs:
           cargo run --release -p turbovec --features turbovec9-lab --example turbovec9_probe | tee turbovec9-probe-results-large.txt
           cat turbovec9-probe-results-large.txt >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Graph-neighbor retention (independent edge labels)
+        working-directory: turbovec
+        env:
+          TV9_WORKLOAD: "graph"
+          TV9_N: "2048"
+          TV9_NQ: "64"
+          TV9_DIM: "128"
+          TV9_K: "10"
+        run: |
+          : > turbovec9-graph-results.txt
+          for noise in 0.8 1.7 2.5; do
+            TV9_NOISE="$noise" cargo run --release -p turbovec --features turbovec9-lab --example turbovec9_probe | tee -a turbovec9-graph-results.txt
+          done
+          cat turbovec9-graph-results.txt >> "$GITHUB_STEP_SUMMARY"
+
       - name: Save raw probe output
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -61,3 +77,4 @@ jobs:
           path: |
             turbovec/turbovec9-probe-results.txt
             turbovec/turbovec9-probe-results-large.txt
+            turbovec/turbovec9-graph-results.txt
