@@ -244,10 +244,7 @@ fn run_graph_probe() {
     let truth: Vec<Vec<usize>> = queries.chunks_exact(dim)
         .map(|q| exact_topk(&db, q, dim, k)).collect();
 
-    println!(
-        "TurboVec9 GRAPH-LAB | n={n} dim={dim} queries={nq} k={k} noise={noise} \\
-         graph=4-positives/group (fixed ground truth, independent of retrieval)"
-    );
+    println!("TurboVec9 GRAPH-LAB | n={n} dim={dim} queries={nq} k={k} noise={noise} | 4 labeled positives/group");
     println!("METRICS: topk_recall_f32 / graph_any_positive@k / graph_edge_coverage@k");
     for (name, bits, search) in [
         ("f32-exact", 32usize, 0usize),
@@ -263,7 +260,7 @@ fn run_graph_probe() {
         // includes its own per-query dispatch and index lookup.
         for (qi, query) in queries.chunks_exact(dim).enumerate() {
             let top = match search {
-                0 => truth[qi].clone(),
+                0 => exact_topk(&db, query, dim, k),
                 1 => i4.topk(query, &rotation, k),
                 2 => i9.topk(query, &rotation, k),
                 _ => prod4.search(query, k).indices_for_query(0)
@@ -275,8 +272,7 @@ fn run_graph_probe() {
             edge_sum += coverage;
         }
         println!(
-            "{name:10} payload={:4} B/vector recall_f32@{k}={:.5} graph_any@{k}={:.5} \\
-             graph_coverage@{k}={:.5} query={:.1} us",
+            "{name:10} payload={:4} B/vector recall_f32@{k}={:.5} graph_any@{k}={:.5} graph_coverage@{k}={:.5} query={:.1} us",
             if search == 0 { dim * 4 } else { row_bytes(dim, bits) },
             recall_sum / nq as f64,
             hit_sum as f64 / nq as f64,
