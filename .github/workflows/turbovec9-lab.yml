@@ -63,9 +63,11 @@ jobs:
           TV9_NQ: "64"
           TV9_DIM: "128"
           TV9_K: "10"
-          TV9_NOISE: "1.7"
         run: |
-          cargo run --release -p turbovec --features turbovec9-lab --example turbovec9_probe | tee turbovec9-graph-results.txt
+          : > turbovec9-graph-results.txt
+          for noise in 0.8 1.7 2.5; do
+            TV9_NOISE="$noise" cargo run --release -p turbovec --features turbovec9-lab --example turbovec9_probe | tee -a turbovec9-graph-results.txt
+          done
           cat turbovec9-graph-results.txt >> "$GITHUB_STEP_SUMMARY"
 
       - name: Save raw probe output
