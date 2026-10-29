@@ -1,0 +1,47 @@
+name: TurboVec9 scalar probe
+
+on:
+  pull_request:
+    paths:
+      - "turbovec/examples/turbovec9_probe.rs"
+      - "turbovec/Cargo.toml"
+      - "turbovec/src/codebook.rs"
+      - "docs/turbovec9-experiment.md"
+      - ".github/workflows/turbovec9-lab.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  turbovec9:
+    runs-on: ubuntu-latest
+    env:
+      # Overrides the fork's older rust-toolchain.toml for THIS lab only.
+      RUSTUP_TOOLCHAIN: "1.99.0"
+    steps:
+      - name: Checkout TurboVec fork
+        uses: actions/checkout@v4
+        with:
+          path: turbovec
+
+      - name: Rust 1.99
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.0
+
+      - name: 9-bit codeword and codebook checks
+        working-directory: turbovec
+        run: cargo test --release -p turbovec --features turbovec9-lab --example turbovec9_probe -- --nocapture
+
+      - name: Deterministic scalar-i4 / scalar-i9 / shipped-i4 comparison
+        working-directory: turbovec
+        run: |
+          cargo run --release -p turbovec --features turbovec9-lab --example turbovec9_probe \
+            | tee turbovec9-probe-results.txt
+          cat turbovec9-probe-results.txt >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Save raw probe output
+        uses: actions/upload-artifact@v4
+        with:
+          name: turbovec9-probe-results
+          path: turbovec/turbovec9-probe-results.txt
