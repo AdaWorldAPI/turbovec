@@ -427,7 +427,7 @@ pub static FORCE_AVX2_PATH: std::sync::atomic::AtomicBool =
 /// Test-only count of `search_multi_query_avx2` calls, so a test can tell
 /// that [`FORCE_AVX2_PATH`] really reached the AVX2 kernel: its scores are
 /// bit-identical to the AVX-512 kernel's, so the results alone cannot.
-#[cfg(test)]
+#[cfg(all(test, target_arch = "x86_64"))]
 pub(crate) static AVX2_KERNEL_CALLS: AtomicU64 = AtomicU64::new(0);
 
 /// Held for writing by the test that sets [`FORCE_SCALAR_FALLBACK`], and
