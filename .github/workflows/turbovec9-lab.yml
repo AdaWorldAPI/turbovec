@@ -14,6 +14,9 @@ permissions:
 jobs:
   turbovec9:
     runs-on: ubuntu-latest
+    env:
+      # Overrides the fork's older rust-toolchain.toml for THIS lab only.
+      RUSTUP_TOOLCHAIN: "1.99.0"
     steps:
       - name: Checkout TurboVec fork
         uses: actions/checkout@v4
