@@ -7502,3 +7502,123 @@ mod avx2_ndarray_simd_parity {
         }
     }
 }
+
+/// Drives `search_multi_query_avx2` directly on synthetic blocked codes and
+/// LUTs and checks it against a scalar reference that reads the same layout.
+/// Unlike `avx2_ndarray_simd_parity` it builds no index, so it does not
+/// depend on which code layout this host picks.
+#[cfg(all(test, target_arch = "x86_64"))]
+mod avx2_kernel_reference {
+    use super::search_multi_query_avx2;
+    use crate::{BLOCK, FLUSH_EVERY};
+
+    struct Lcg(u64);
+    impl Lcg {
+        fn next(&mut self) -> u32 {
+            self.0 = self.0.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            (self.0 >> 33) as u32
+        }
+        fn unit(&mut self) -> f32 {
+            self.next() as f32 / (1u64 << 31) as f32
+        }
+    }
+
+    /// Score of vector slot `s` of block `b`. Within a block's 32-byte group,
+    /// slot `s < 16` reads the low nibbles and `s >= 16` the high nibbles; the
+    /// code byte is `q` for the first 16-entry table and `16 + q` for the
+    /// second, with `q = 2t` for `t = s % 16 < 8` and `q = 2(t - 8) + 1`
+    /// otherwise.
+    #[allow(clippy::too_many_arguments)]
+    fn reference_score(
+        codes: &[u8], lut: &[u8], scale: f32, bias: f32, n_byte_groups: usize,
+        vec_scale: f32, b: usize, s: usize,
+    ) -> f32 {
+        let t = s % 16;
+        let q = if t < 8 { 2 * t } else { 2 * (t - 8) + 1 };
+        let nib = |c: u8| if s < 16 { c & 0x0F } else { c >> 4 };
+        let mut fa = bias;
+        let mut g = 0;
+        while g < n_byte_groups {
+            let end = (g + FLUSH_EVERY).min(n_byte_groups);
+            let mut sum = 0u32;
+            for gg in g..end {
+                let off = (b * n_byte_groups + gg) * BLOCK;
+                sum += lut[gg * 32 + nib(codes[off + q]) as usize] as u32;
+                sum += lut[gg * 32 + 16 + nib(codes[off + 16 + q]) as usize] as u32;
+            }
+            fa = scale.mul_add(sum as f32, fa);
+            g = end;
+        }
+        fa * vec_scale
+    }
+
+    fn check(n_byte_groups: usize, n_vectors: usize, nq: usize, k: usize, masked: bool, seed: u64) {
+        if !(is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma")) {
+            return;
+        }
+        let mut rng = Lcg(seed);
+        let n_blocks = n_vectors.div_ceil(BLOCK);
+        let codes: Vec<u8> = (0..n_blocks * n_byte_groups * BLOCK).map(|_| rng.next() as u8).collect();
+        let luts: Vec<Vec<u8>> = (0..4)
+            .map(|_| (0..n_byte_groups * 32).map(|_| (rng.next() % 128) as u8).collect())
+            .collect();
+        let lut_refs: Vec<&[u8]> = luts.iter().map(|l| l.as_slice()).collect();
+        let scales: Vec<f32> = (0..4).map(|_| 0.001 + rng.unit() * 0.01).collect();
+        let biases: Vec<f32> = (0..4).map(|_| rng.unit() - 0.5).collect();
+        let vec_scales: Vec<f32> = (0..n_vectors).map(|_| 0.5 + rng.unit()).collect();
+        let mask: Option<Vec<u64>> = masked.then(|| {
+            (0..n_vectors.div_ceil(64)).map(|_| (rng.next() as u64) << 32 | rng.next() as u64).collect()
+        });
+        let allows = |v: usize| mask.as_ref().is_none_or(|m| (m[v >> 6] >> (v & 63)) & 1 != 0);
+
+        let mut heap_scores = vec![vec![f32::NEG_INFINITY; k]; nq];
+        let mut heap_indices = vec![vec![0u64; k]; nq];
+        let mut heap_sizes = vec![0usize; nq];
+        let mut heap_mins = vec![f32::NEG_INFINITY; nq];
+        let mut heap_min_idxs = vec![0usize; nq];
+        // SAFETY: AVX2 and FMA were detected above.
+        unsafe {
+            search_multi_query_avx2(
+                &codes, &lut_refs, &scales, &biases, n_byte_groups, &vec_scales, n_vectors,
+                nq, k, mask.as_deref(),
+                &mut heap_scores, &mut heap_indices, &mut heap_sizes, &mut heap_mins, &mut heap_min_idxs,
+            );
+        }
+
+        for qi in 0..nq {
+            let mut expected: Vec<(u32, u64)> = (0..n_vectors)
+                .filter(|&v| allows(v))
+                .map(|v| {
+                    let score = reference_score(
+                        &codes, &luts[qi], scales[qi], biases[qi], n_byte_groups,
+                        vec_scales[v], v / BLOCK, v % BLOCK,
+                    );
+                    (score.to_bits(), v as u64)
+                })
+                .collect();
+            expected.sort_by(|a, b| f32::from_bits(b.0).total_cmp(&f32::from_bits(a.0)).then(a.1.cmp(&b.1)));
+            expected.truncate(k);
+            expected.sort_by_key(|e| e.1);
+
+            let sz = heap_sizes[qi];
+            let mut got: Vec<(u32, u64)> = (0..sz).map(|i| (heap_scores[qi][i].to_bits(), heap_indices[qi][i])).collect();
+            got.sort_by_key(|e| e.1);
+            assert_eq!(got, expected, "query {qi}: groups {n_byte_groups}, n {n_vectors}, k {k}, masked {masked}");
+        }
+    }
+
+    #[test]
+    fn two_flush_batches_and_a_partial_block() {
+        check(2 * FLUSH_EVERY + 4, 70, 3, 5, false, 1);
+    }
+
+    #[test]
+    fn masked_whole_blocks_with_four_queries() {
+        check(8, 96, 4, 10, true, 2);
+    }
+
+    #[test]
+    fn heap_never_fills() {
+        check(16, 40, 2, 50, false, 3);
+    }
+}
