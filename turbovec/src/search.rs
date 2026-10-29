@@ -424,6 +424,12 @@ pub static FORCE_SCALAR_FALLBACK: std::sync::atomic::AtomicBool =
 pub static FORCE_AVX2_PATH: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+/// Test-only count of `search_multi_query_avx2` calls, so a test can tell
+/// that [`FORCE_AVX2_PATH`] really reached the AVX2 kernel: its scores are
+/// bit-identical to the AVX-512 kernel's, so the results alone cannot.
+#[cfg(test)]
+pub(crate) static AVX2_KERNEL_CALLS: AtomicU64 = AtomicU64::new(0);
+
 /// Held for writing by the test that sets [`FORCE_SCALAR_FALLBACK`], and
 /// for reading by tests that compare two searches' scores bit for bit:
 /// the scalar path ranks the same but rounds differently, so a flip
@@ -777,6 +783,8 @@ unsafe fn search_multi_query_avx2(
     heap_mins: &mut [f32],
     heap_min_idxs: &mut [usize],
 ) {
+    #[cfg(test)]
+    AVX2_KERNEL_CALLS.fetch_add(1, Ordering::Relaxed);
     let n_blocks = (n_vectors + BLOCK - 1) / BLOCK;
 
     // Two consecutive byte groups are adjacent in both the blocked codes and
@@ -7434,7 +7442,7 @@ mod gate_tests {
 #[cfg(test)]
 #[cfg(target_arch = "x86_64")]
 mod avx2_ndarray_simd_parity {
-    use super::{FORCE_AVX2_PATH, FORCE_SCALAR_FALLBACK, SCALAR_FALLBACK_GATE};
+    use super::{AVX2_KERNEL_CALLS, FORCE_AVX2_PATH, FORCE_SCALAR_FALLBACK, SCALAR_FALLBACK_GATE};
     use crate::TurboQuantIndex;
     use std::collections::BTreeSet;
     use std::sync::atomic::Ordering;
@@ -7482,11 +7490,22 @@ mod avx2_ndarray_simd_parity {
 
             FORCE_SCALAR_FALLBACK.store(false, Ordering::SeqCst);
             FORCE_AVX2_PATH.store(false, Ordering::SeqCst);
+            let calls_before = AVX2_KERNEL_CALLS.load(Ordering::SeqCst);
             let reference = index.search(&queries, k);
+            let calls_reference = AVX2_KERNEL_CALLS.load(Ordering::SeqCst);
 
             FORCE_AVX2_PATH.store(true, Ordering::SeqCst);
             let avx2 = index.search(&queries, k);
             FORCE_AVX2_PATH.store(false, Ordering::SeqCst);
+            let calls_avx2 = AVX2_KERNEL_CALLS.load(Ordering::SeqCst);
+
+            // Both searches must take the kernel they are meant to, or this
+            // compares a kernel with itself. Other tests only reach the AVX2
+            // kernel on hosts without AVX-512BW or while holding the gate.
+            assert!(calls_avx2 > calls_reference, "dim {dim}: FORCE_AVX2_PATH did not reach the AVX2 kernel");
+            if is_x86_feature_detected!("avx512bw") && is_x86_feature_detected!("avx512f") {
+                assert_eq!(calls_reference, calls_before, "dim {dim}: the default search took the AVX2 kernel");
+            }
 
             for qi in 0..nq {
                 let r: BTreeSet<i64> = reference.indices[qi * k..(qi + 1) * k].iter().copied().collect();
@@ -7511,7 +7530,7 @@ mod avx2_ndarray_simd_parity {
 #[cfg(test)]
 #[cfg(target_arch = "x86_64")]
 mod avx2_kernel_reference {
-    use super::search_multi_query_avx2;
+    use super::{search_multi_query_avx2, SCALAR_FALLBACK_GATE};
     use crate::{BLOCK, FLUSH_EVERY};
 
     struct Lcg(u64);
@@ -7558,6 +7577,8 @@ mod avx2_kernel_reference {
         if !(is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma")) {
             return;
         }
+        // Keeps these calls out of the AVX2 call count the parity test reads.
+        let _gate = SCALAR_FALLBACK_GATE.read().unwrap_or_else(|e| e.into_inner());
         let mut rng = Lcg(seed);
         let n_blocks = n_vectors.div_ceil(BLOCK);
         let codes: Vec<u8> = (0..n_blocks * n_byte_groups * BLOCK).map(|_| rng.next() as u8).collect();
