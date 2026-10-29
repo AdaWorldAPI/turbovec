@@ -5,10 +5,12 @@
 //! The 9-bit code is a 0..511 Lloyd-Max centroid ID, NOT ndarray Codec9's
 //! DR512 presence/polarity encoding.
 //!
-//! From the AdaWorldAPI/turbovec checkout with sibling ../ndarray:
-//!   cargo test -p turbovec --release --example turbovec9_probe
-//!   cargo run -p turbovec --release --example turbovec9_probe
-//! Environment overrides: TV9_N, TV9_NQ, TV9_DIM, TV9_K, TV9_REPEATS.
+//! From the standalone AdaWorldAPI/turbovec checkout:
+//!   cargo test --release -p turbovec --features turbovec9-lab --example turbovec9_probe
+//!   cargo run --release -p turbovec --features turbovec9-lab --example turbovec9_probe
+//!   TV9_WORKLOAD=graph cargo run --release -p turbovec --features turbovec9-lab --example turbovec9_probe
+//! Environment overrides: TV9_N, TV9_NQ, TV9_DIM, TV9_K, TV9_REPEATS,
+//! TV9_WORKLOAD, TV9_NOISE (only for the graph workload).
 
 use std::hint::black_box;
 use std::time::Instant;
