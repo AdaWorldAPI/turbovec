@@ -144,6 +144,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "ndarray"
+version = "0.17.2"
+source = "git+https://github.com/AdaWorldAPI/ndarray?branch=master#f8eb95e22855351ef6fb3e44fa8784dffa453ee7"
+dependencies = [
+ "matrixmultiply",
+ "num-complex",
+ "num-integer",
+ "num-traits",
+ "paste",
+ "portable-atomic",
+ "portable-atomic-util",
+ "rawpointer",
+]
+
+[[package]]
 name = "num-complex"
 version = "0.4.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -188,7 +203,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6a5b15d63a5ff39e378daed0e1340d3a5964703ea9712eb09a0dc66fade996f4"
 dependencies = [
  "libc",
- "ndarray",
+ "ndarray 0.17.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "num-complex",
  "num-integer",
  "num-traits",
@@ -444,6 +459,7 @@ checksum = "adb6935a6f5c20170eeceb1a3835a49e12e19d792f6dd344ccc76a985ca5a6ca"
 name = "turbovec"
 version = "1.1.2"
 dependencies = [
+ "ndarray 0.17.2 (git+https://github.com/AdaWorldAPI/ndarray?branch=master)",
  "ordered-float",
  "rand",
  "rand_chacha",

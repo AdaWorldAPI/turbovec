@@ -11,6 +11,30 @@ appears under each surface it touches.
 
 ## [Unreleased]
 
+### turbovec — Rust crate
+
+#### Changed
+
+- **The minimum supported Rust version is now 1.99** (was 1.89), for the
+  AdaWorldAPI `ndarray` fork the AVX2 search kernel now depends on.
+- **The AVX2 search kernel uses the `ndarray::simd` polyfill instead of raw
+  intrinsics.** Scores and results are bit-identical to the AVX-512 kernel.
+  It is only used on x86_64 hosts without AVX-512BW. It is slower than the
+  raw-intrinsics kernel it replaces: about 12x on the default build, and
+  about 15% when the crate is built with AVX-512 enabled.
+
+#### Added
+
+- **`bench-internals` feature**: exposes `FORCE_SCALAR_FALLBACK` and
+  `FORCE_AVX2_PATH`, which force a scoring path, for the `kernel_speed`
+  example.
+
+### turbovec — Python package
+
+#### Changed
+
+- **Building from source needs Rust 1.99** (was 1.89).
+
 ## turbovec 1.1.2 (Python package) + turbovec 1.1.2 (Rust crate) — 2026-10-06
 
 The staged search that 1.1.0 made the default lost recall on embeddings

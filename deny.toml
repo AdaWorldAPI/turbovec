@@ -36,6 +36,9 @@ wildcards = "warn"
 # dependency slipping into the tree is a supply-chain red flag, so fail on it.
 unknown-registry = "deny"
 unknown-git = "deny"
+# AdaWorldAPI fork: the one allowed git source is the ndarray fork whose
+# `ndarray::simd` polyfill the AVX2 search kernel uses.
+allow-git = ["https://github.com/AdaWorldAPI/ndarray"]
 
 # NB: license compliance is intentionally out of scope for this file. It is a
 # legal/compliance concern rather than a security one, and an allow-list is the
