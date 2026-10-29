@@ -132,7 +132,7 @@ dependencies = [
 [[package]]
 name = "ndarray"
 version = "0.17.2"
-source = "git+https://github.com/AdaWorldAPI/ndarray?branch=claude%2Fu16x32-facade-gaps#ca7dbab07be95646c5f0c7c302c1b1b558f2bdd0"
+source = "git+https://github.com/AdaWorldAPI/ndarray?branch=master#f8eb95e22855351ef6fb3e44fa8784dffa453ee7"
 dependencies = [
  "matrixmultiply",
  "num-complex",

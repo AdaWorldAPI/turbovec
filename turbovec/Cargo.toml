@@ -69,7 +69,7 @@ statrs = "=0.17.1"
 # kernel's wide ops go through it instead of raw intrinsics. Only the core
 # layer is pulled in, so no BLAS is linked.
 [target.'cfg(target_arch = "x86_64")'.dependencies]
-ndarray = { git = "https://github.com/AdaWorldAPI/ndarray", branch = "claude/u16x32-facade-gaps", default-features = false, features = ["std"] }
+ndarray = { git = "https://github.com/AdaWorldAPI/ndarray", branch = "master", default-features = false, features = ["std"] }
 
 [features]
 # Deliberately isolated 9-bit Lloyd-Max scalar probe; never enables
