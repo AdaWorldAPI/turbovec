@@ -1,0 +1,52 @@
+name: TurboVec9 scalar probe
+
+on:
+  pull_request:
+    paths:
+      - "turbovec/examples/turbovec9_probe.rs"
+      - "turbovec/Cargo.toml"
+      - "docs/turbovec9-experiment.md"
+      - ".github/workflows/turbovec9-lab.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  turbovec9:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout TurboVec fork
+        uses: actions/checkout@v4
+        with:
+          path: turbovec
+
+      # The AdaWorldAPI fork has a path dependency at ../../ndarray relative
+      # to turbovec/turbovec/Cargo.toml. Both must be siblings in GITHUB_WORKSPACE.
+      - name: Checkout canonical ndarray kernel
+        uses: actions/checkout@v4
+        with:
+          repository: AdaWorldAPI/ndarray
+          ref: master
+          path: ndarray
+
+      - name: Rust 1.99
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.0
+
+      - name: 9-bit codeword and codebook checks
+        working-directory: turbovec
+        run: cargo test --release -p turbovec --example turbovec9_probe -- --nocapture
+
+      - name: Deterministic scalar-i4 / scalar-i9 / shipped-i4 comparison
+        working-directory: turbovec
+        run: |
+          cargo run --release -p turbovec --example turbovec9_probe \
+            | tee turbovec9-probe-results.txt
+          cat turbovec9-probe-results.txt >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Save raw probe output
+        uses: actions/upload-artifact@v4
+        with:
+          name: turbovec9-probe-results
+          path: turbovec/turbovec9-probe-results.txt
