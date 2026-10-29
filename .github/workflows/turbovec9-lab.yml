@@ -29,7 +29,7 @@ jobs:
         run: |
           rustup toolchain install 1.99.0 --profile minimal
           rustc --version
-          lscpu | grep -E 'Model name|Architecture|CPU\\(s\\)' || true
+          lscpu | grep -E 'Model name|Architecture|CPU' || true
 
       - name: 9-bit codeword and codebook checks
         working-directory: turbovec
@@ -51,8 +51,7 @@ jobs:
           TV9_K: "10"
           TV9_REPEATS: "3"
         run: |
-          cargo run --release -p turbovec --features turbovec9-lab --example turbovec9_probe \\
-            | tee turbovec9-probe-results-large.txt
+          cargo run --release -p turbovec --features turbovec9-lab --example turbovec9_probe | tee turbovec9-probe-results-large.txt
           cat turbovec9-probe-results-large.txt >> "$GITHUB_STEP_SUMMARY"
 
       - name: Save raw probe output
