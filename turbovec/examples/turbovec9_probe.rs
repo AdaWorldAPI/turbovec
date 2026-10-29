@@ -10,7 +10,6 @@
 //!   cargo run -p turbovec --release --example turbovec9_probe
 //! Environment overrides: TV9_N, TV9_NQ, TV9_DIM, TV9_K, TV9_REPEATS.
 
-use std::cmp::Ordering;
 use std::hint::black_box;
 use std::time::Instant;
 use turbovec::{codebook, rotation, TurboQuantIndex};
