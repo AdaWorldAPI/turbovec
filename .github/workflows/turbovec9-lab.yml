@@ -16,18 +16,20 @@ jobs:
   turbovec9:
     runs-on: ubuntu-latest
     env:
-      # Overrides the fork's older rust-toolchain.toml for THIS lab only.
+      # Explicit independent lab compiler; production MSRV remains unchanged.
       RUSTUP_TOOLCHAIN: "1.99.0"
     steps:
       - name: Checkout TurboVec fork
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: turbovec
+          persist-credentials: false
 
-      - name: Rust 1.99
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: 1.99.0
+      - name: Rust 1.99 and host fingerprint
+        run: |
+          rustup toolchain install 1.99.0 --profile minimal
+          rustc --version
+          lscpu | grep -E 'Model name|Architecture|CPU\\(s\\)' || true
 
       - name: 9-bit codeword and codebook checks
         working-directory: turbovec
@@ -40,8 +42,23 @@ jobs:
             | tee turbovec9-probe-results.txt
           cat turbovec9-probe-results.txt >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Larger deterministic sample
+        working-directory: turbovec
+        env:
+          TV9_N: "2048"
+          TV9_NQ: "64"
+          TV9_DIM: "128"
+          TV9_K: "10"
+          TV9_REPEATS: "3"
+        run: |
+          cargo run --release -p turbovec --features turbovec9-lab --example turbovec9_probe \\
+            | tee turbovec9-probe-results-large.txt
+          cat turbovec9-probe-results-large.txt >> "$GITHUB_STEP_SUMMARY"
+
       - name: Save raw probe output
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: turbovec9-probe-results
-          path: turbovec/turbovec9-probe-results.txt
+          path: |
+            turbovec/turbovec9-probe-results.txt
+            turbovec/turbovec9-probe-results-large.txt
