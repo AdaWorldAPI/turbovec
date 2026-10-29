@@ -159,7 +159,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       # Pinned so the linter and the allow-list move together, on purpose.
-      RUST_CLIPPY_VERSION: "1.97.0"
+      RUST_CLIPPY_VERSION: "1.99.0"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -193,6 +193,7 @@ jobs:
           FLAGS=(
             -D warnings
             -A clippy::assertions_on_constants
+            -A clippy::chunks_exact_to_as_chunks
             -A clippy::doc_lazy_continuation
             -A clippy::empty_line_after_doc_comments
             -A clippy::excessive_precision
@@ -202,6 +203,7 @@ jobs:
             -A clippy::manual_checked_ops
             -A clippy::manual_div_ceil
             -A clippy::manual_is_multiple_of
+            -A clippy::manual_isolate_lowest_one
             -A clippy::manual_repeat_n
             -A clippy::needless_range_loop
             -A clippy::needless_return

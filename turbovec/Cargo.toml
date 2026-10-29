@@ -24,7 +24,8 @@ edition = "2021"
 # ubuntu-latest, so it catches an *under*-declaration; nothing checks the
 # release below, which is why an over-declaration would have to be found by
 # hand.
-rust-version = "1.89"
+# AdaWorldAPI fork: raised to 1.99 because the ndarray fork below requires it.
+rust-version = "1.99"
 description = "Fast vector quantization with 2-4 bit compression and SIMD search"
 license = "MIT"
 repository = "https://github.com/RyanCodrai/turbovec"
@@ -64,6 +65,12 @@ rand_chacha = "=0.3.1"
 # input from moving under it unasked.
 statrs = "=0.17.1"
 
+# AdaWorldAPI ndarray fork, for its `ndarray::simd` polyfill: the AVX2 search
+# kernel's wide ops go through it instead of raw intrinsics. Only the core
+# layer is pulled in, so no BLAS is linked.
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+ndarray = { git = "https://github.com/AdaWorldAPI/ndarray", branch = "claude/u16x32-facade-gaps", default-features = false, features = ["std"] }
+
 [features]
 # Deliberately isolated 9-bit Lloyd-Max scalar probe; never enables
 # 9-bit codes in production indexes or the on-disk format.
@@ -72,6 +79,13 @@ turbovec9-lab = []
 # slot-mask early exit. Off by default — the per-skip atomic RMW on a
 # shared cache line serializes the masked search hot loop (#294).
 mask-skip-counter = []
+# Makes FORCE_SCALAR_FALLBACK and FORCE_AVX2_PATH available outside cfg(test),
+# so the kernel_speed example can force each x86 scoring path.
+bench-internals = []
+
+[[example]]
+name = "kernel_speed"
+required-features = ["bench-internals"]
 
 [dev-dependencies]
 # Self dev-dependency so `cargo test` still exercises the block-skip

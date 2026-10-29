@@ -389,6 +389,8 @@ fn smooth_tile_count(n_ranges: usize, n_quads: usize, n_threads: usize) -> usize
 
 use crate::rotation::Rotation;
 use crate::{BLOCK, FLUSH_EVERY};
+#[cfg(target_arch = "x86_64")]
+use ndarray::simd::{F32x16, U16x32, U8x64};
 
 /// Cumulative count of 32-vector blocks short-circuited by the mask
 /// early-exit path, incremented by [`block_has_allowed`] and
@@ -407,9 +409,19 @@ pub(crate) static BLOCKS_SKIPPED_BY_MASK: AtomicU64 = AtomicU64::new(0);
 /// fallback even when AVX2/AVX-512 is available, so tests can exercise
 /// `score_query_into_heap` on hardware that would otherwise always pick a
 /// SIMD kernel. Compiled only under `cfg(test)` — zero cost in release.
-#[cfg(test)]
+#[cfg(any(test, feature = "bench-internals"))]
 #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
-pub(crate) static FORCE_SCALAR_FALLBACK: std::sync::atomic::AtomicBool =
+pub static FORCE_SCALAR_FALLBACK: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Test/bench switch that makes the classic-layout x86 dispatch take the AVX2
+/// kernel even when AVX-512BW is present, so `search_multi_query_avx2` can be
+/// exercised on AVX-512 hosts. [`FORCE_SCALAR_FALLBACK`] still wins. It only
+/// reaches the classic layout: a vector-major index is read by its own kernel
+/// (see `pack::use_vector_major`, `TURBOVEC_NO_VECTOR_MAJOR`).
+#[cfg(any(test, feature = "bench-internals"))]
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+pub static FORCE_AVX2_PATH: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
 /// Held for writing by the test that sets [`FORCE_SCALAR_FALLBACK`], and
@@ -765,14 +777,13 @@ unsafe fn search_multi_query_avx2(
     heap_mins: &mut [f32],
     heap_min_idxs: &mut [usize],
 ) {
-    use std::arch::x86_64::*;
-
     let n_blocks = (n_vectors + BLOCK - 1) / BLOCK;
-    // SIMD nibble mask; named distinctly from the `mask: Option<&[u64]>`
-    // function parameter (the slot allowlist) to avoid shadowing inside
-    // the loops below where we test the slot mask.
-    let nibble_mask = _mm256_set1_epi8(0x0F);
-    let codes_base = blocked_codes.as_ptr();
+
+    // Two consecutive byte groups are adjacent in both the blocked codes and
+    // each LUT, so one 64-byte load covers a pair of groups. `shuffle_bytes`
+    // looks up within each 16-byte lane, which lines every code byte up with
+    // its own group's 16-entry table.
+    let nibble_mask = U8x64::splat(0x0F);
 
     for b in 0..n_blocks {
         let base_vec = b * BLOCK;
@@ -781,116 +792,101 @@ unsafe fn search_multi_query_avx2(
         }
 
         // Per-query f32 score accumulators, seeded with the per-query bias so
-        // the per-batch flush below is a single `fmadd(v_scale, partial, fa)`
+        // the per-batch flush below is a single `mul_add(v_scale, partial, fa)`
         // — matching the operation sequence of `score_4bit_block_neon` on
         // ARM, which lets the two kernels produce bit-identical scores given
-        // the same encoded LUTs.
-        let v_scales: [__m256; 4] = [
-            _mm256_set1_ps(scales[0]),
-            _mm256_set1_ps(scales[1]),
-            _mm256_set1_ps(scales[2]),
-            _mm256_set1_ps(scales[3]),
-        ];
-        let v_biases: [__m256; 4] = [
-            _mm256_set1_ps(biases[0]),
-            _mm256_set1_ps(biases[1]),
-            _mm256_set1_ps(biases[2]),
-            _mm256_set1_ps(biases[3]),
-        ];
-        let mut fa = [
-            [v_biases[0]; 4],
-            [v_biases[1]; 4],
-            [v_biases[2]; 4],
-            [v_biases[3]; 4],
-        ];
+        // the same encoded LUTs. `fa[qi][0]` holds code-byte positions 0..16
+        // of the low nibbles, `fa[qi][1]` those of the high nibbles; they are
+        // put into vector order once per block, below.
+        let v_scales: [F32x16; 4] = std::array::from_fn(|qi| F32x16::splat(scales[qi]));
+        let mut fa: [[F32x16; 2]; 4] = std::array::from_fn(|qi| [F32x16::splat(biases[qi]); 2]);
 
-        // Batch the inner-group loop by FLUSH_EVERY so the per-half u16
-        // accumulator can hold `FLUSH_EVERY * max_lut <= 65535` (256 * 127 =
-        // 32512 ≪ 65535 with max_lut=127). Without this flush the AVX2
-        // SUB-trick would require capping max_lut at 65535/n_byte_groups,
-        // dropping LUT precision sharply at high dim — the source of the
-        // historical ARM vs x86 recall gap.
+        // Batch the inner-group loop by FLUSH_EVERY so each u16 lane holds at
+        // most `FLUSH_EVERY * max_lut <= 65535` (256 * 127 = 32512 with
+        // max_lut=127); without the flush max_lut would have to shrink with
+        // n_byte_groups, which is what used to cost x86 recall against ARM.
         let n_batches = (n_byte_groups + FLUSH_EVERY - 1) / FLUSH_EVERY;
         for batch in 0..n_batches {
             let g_start = batch * FLUSH_EVERY;
             let g_end = (g_start + FLUSH_EVERY).min(n_byte_groups);
-            let mut accus = [[_mm256_setzero_si256(); 4]; 4];
+            // accus[qi][0]: low-nibble lookups, accus[qi][1]: high-nibble
+            // lookups. Lane p < 16 is sub-quantizer A at code byte p, lane
+            // 16 + p sub-quantizer B at code byte 16 + p.
+            let mut accus = [[U16x32::zero(); 2]; 4];
 
-            for g in g_start..g_end {
-                let cp = codes_base.add((b * n_byte_groups + g) * BLOCK);
-                let codes_v = _mm256_loadu_si256(cp as *const __m256i);
-                let clo = _mm256_and_si256(codes_v, nibble_mask);
-                let chi = _mm256_and_si256(_mm256_srli_epi16(codes_v, 4), nibble_mask);
+            let mut g = g_start;
+            while g < g_end {
+                let off = (b * n_byte_groups + g) * BLOCK;
+                // dim is a multiple of 8, so n_byte_groups = dim / 2 is a
+                // multiple of 4 and every batch holds whole pairs. A lone last
+                // group is still handled, with zero codes and a zero LUT in the
+                // partner half (they add nothing), so the loads stay in bounds
+                // if that ever changes.
+                let pair = g + 1 < g_end;
+                let mut tail_codes = [0u8; 2 * BLOCK];
+                let codes_v = if pair {
+                    U8x64::from_slice(&blocked_codes[off..off + 2 * BLOCK])
+                } else {
+                    tail_codes[..BLOCK].copy_from_slice(&blocked_codes[off..off + BLOCK]);
+                    U8x64::from_array(tail_codes)
+                };
+                let clo = codes_v & nibble_mask;
+                let chi = codes_v.shr_epi16(4) & nibble_mask;
 
                 for qi in 0..4 {
-                    let lut = _mm256_loadu_si256(luts[qi].as_ptr().add(g * 32) as *const __m256i);
-                    let res0 = _mm256_shuffle_epi8(lut, clo);
-                    let res1 = _mm256_shuffle_epi8(lut, chi);
-                    accus[qi][0] = _mm256_add_epi16(accus[qi][0], res0);
-                    accus[qi][1] = _mm256_add_epi16(accus[qi][1], _mm256_srli_epi16(res0, 8));
-                    accus[qi][2] = _mm256_add_epi16(accus[qi][2], res1);
-                    accus[qi][3] = _mm256_add_epi16(accus[qi][3], _mm256_srli_epi16(res1, 8));
+                    let lut = if pair {
+                        U8x64::from_slice(&luts[qi][g * 32..g * 32 + 64])
+                    } else {
+                        let mut t = [0u8; 64];
+                        t[..32].copy_from_slice(&luts[qi][g * 32..g * 32 + 32]);
+                        U8x64::from_array(t)
+                    };
+                    let res_lo = lut.shuffle_bytes(clo);
+                    let res_hi = lut.shuffle_bytes(chi);
+                    accus[qi][0] += U16x32::from_u8x64_lo(res_lo) + U16x32::from_u8x64_hi(res_lo);
+                    accus[qi][1] += U16x32::from_u8x64_lo(res_hi) + U16x32::from_u8x64_hi(res_hi);
                 }
+                g += 2;
             }
 
-            // Batch epilogue: SUB trick → combine → convert i16→f32 → FMA
-            // into per-query f32 accumulator. fmadd(v_scale, partial, fa)
-            // mirrors ARM's `vfmaq_f32(fa, v_scale, lo/hi)` per flush.
+            // Batch epilogue: add the two sub-quantizers per code byte,
+            // convert to f32 and fold into the per-query accumulator. The sums
+            // are integers below 2^24, so adding them in f32 is exact.
             for qi in 0..4 {
-                let mut lo_a0 = accus[qi][0];
-                let lo_a1 = accus[qi][1];
-                let mut hi_a2 = accus[qi][2];
-                let hi_a3 = accus[qi][3];
-                lo_a0 = _mm256_sub_epi16(lo_a0, _mm256_slli_epi16(lo_a1, 8));
-                hi_a2 = _mm256_sub_epi16(hi_a2, _mm256_slli_epi16(hi_a3, 8));
-
-                let dis0 = _mm256_add_epi16(
-                    _mm256_permute2x128_si256(lo_a0, lo_a1, 0x21),
-                    _mm256_blend_epi32(lo_a0, lo_a1, 0xF0),
-                );
-                let dis1 = _mm256_add_epi16(
-                    _mm256_permute2x128_si256(hi_a2, hi_a3, 0x21),
-                    _mm256_blend_epi32(hi_a2, hi_a3, 0xF0),
-                );
-
-                let f0 = _mm256_cvtepi32_ps(_mm256_cvtepu16_epi32(_mm256_castsi256_si128(dis0)));
-                let f1 = _mm256_cvtepi32_ps(_mm256_cvtepu16_epi32(_mm256_extracti128_si256(dis0, 1)));
-                let f2 = _mm256_cvtepi32_ps(_mm256_cvtepu16_epi32(_mm256_castsi256_si128(dis1)));
-                let f3 = _mm256_cvtepi32_ps(_mm256_cvtepu16_epi32(_mm256_extracti128_si256(dis1, 1)));
-
-                fa[qi][0] = _mm256_fmadd_ps(v_scales[qi], f0, fa[qi][0]);
-                fa[qi][1] = _mm256_fmadd_ps(v_scales[qi], f1, fa[qi][1]);
-                fa[qi][2] = _mm256_fmadd_ps(v_scales[qi], f2, fa[qi][2]);
-                fa[qi][3] = _mm256_fmadd_ps(v_scales[qi], f3, fa[qi][3]);
+                for h in 0..2 {
+                    let partial = accus[qi][h].to_f32x16_lo() + accus[qi][h].to_f32x16_hi();
+                    fa[qi][h] = v_scales[qi].mul_add(partial, fa[qi][h]);
+                }
             }
         }
 
         let end = (base_vec + BLOCK).min(n_vectors);
-        let vec_scales_ptr = vec_scales.as_ptr().add(base_vec);
+        let n_live = end - base_vec;
 
         for qi in 0..nq {
             // fa already holds bias + Σ scale*partial — only vec_scales left.
-            let f0 = fa[qi][0];
-            let f1 = fa[qi][1];
-            let f2 = fa[qi][2];
-            let f3 = fa[qi][3];
-
+            // Code byte p of a nibble half holds the vector in slot p / 2 if p
+            // is even and 8 + p / 2 if odd (the blocked pack layout).
+            let mut by_byte = [0.0f32; BLOCK];
+            fa[qi][0].copy_to_slice(&mut by_byte[..16]);
+            fa[qi][1].copy_to_slice(&mut by_byte[16..]);
             let mut block_out = [0.0f32; BLOCK];
-            let bp = block_out.as_mut_ptr();
+            for (p, &score) in by_byte.iter().enumerate() {
+                let half = p & 16;
+                let q = p & 15;
+                block_out[half + (q >> 1) + (q & 1) * 8] = score;
+            }
 
-            if end - base_vec == BLOCK {
-                for (i, f) in [f0, f1, f2, f3].iter().enumerate() {
-                    let n = _mm256_loadu_ps(vec_scales_ptr.add(i * 8));
-                    _mm256_storeu_ps(bp.add(i * 8), _mm256_mul_ps(*f, n));
+            if n_live == BLOCK {
+                for i in 0..2 {
+                    let n = F32x16::from_slice(&vec_scales[base_vec + i * 16..]);
+                    (F32x16::from_slice(&block_out[i * 16..]) * n).copy_to_slice(&mut block_out[i * 16..]);
                 }
             } else {
-                for (i, f) in [f0, f1, f2, f3].iter().enumerate() {
-                    _mm256_storeu_ps(bp.add(i * 8), *f);
+                for lane in 0..n_live {
+                    block_out[lane] *= vec_scales[base_vec + lane];
                 }
-                for lane in 0..(end - base_vec) {
-                    block_out[lane] *= *vec_scales_ptr.add(lane);
-                }
-                for lane in (end - base_vec)..BLOCK {
+                for lane in n_live..BLOCK {
                     block_out[lane] = f32::NEG_INFINITY;
                 }
             }
@@ -902,7 +898,7 @@ unsafe fn search_multi_query_avx2(
             let hmi = &mut heap_min_idxs[qi];
 
             if *sz < k {
-                for lane in 0..(end - base_vec) {
+                for lane in 0..n_live {
                     if let Some(m) = mask {
                         if !mask_allows(m, base_vec + lane) { continue; }
                     }
@@ -925,15 +921,17 @@ unsafe fn search_multi_query_avx2(
                     }
                 }
             } else {
-                let v_hmin = _mm256_set1_ps(*hmin);
-                for chunk in 0..4 {
-                    let chunk_start = chunk * 8;
-                    if chunk_start >= end - base_vec { break; }
-                    let scores_v = _mm256_loadu_ps(block_out.as_ptr().add(chunk_start));
-                    let cmp = _mm256_cmp_ps(scores_v, v_hmin, _CMP_GT_OQ);
-                    if _mm256_movemask_ps(cmp) == 0 { continue; }
+                let hmin_v = F32x16::splat(*hmin);
+                for chunk in 0..2 {
+                    let chunk_start = chunk * 16;
+                    if chunk_start >= n_live {
+                        break;
+                    }
+                    if F32x16::from_slice(&block_out[chunk_start..]).simd_gt(hmin_v).to_bitmask() == 0 {
+                        continue;
+                    }
 
-                    let chunk_end = (chunk_start + 8).min(end - base_vec);
+                    let chunk_end = (chunk_start + 16).min(n_live);
                     for lane in chunk_start..chunk_end {
                         if let Some(m) = mask {
                             if !mask_allows(m, base_vec + lane) { continue; }
@@ -6699,11 +6697,15 @@ fn scan_with_luts(
                 let mut heap_min_idxs =
                     vec![if buffered { HEAP_BUFFERED } else { 0usize }; batch_nq];
 
-                #[cfg(test)]
+                #[cfg(any(test, feature = "bench-internals"))]
                 let force_scalar =
                     FORCE_SCALAR_FALLBACK.load(std::sync::atomic::Ordering::Relaxed);
-                #[cfg(not(test))]
+                #[cfg(not(any(test, feature = "bench-internals")))]
                 let force_scalar = false;
+                #[cfg(any(test, feature = "bench-internals"))]
+                let force_avx2 = FORCE_AVX2_PATH.load(std::sync::atomic::Ordering::Relaxed);
+                #[cfg(not(any(test, feature = "bench-internals")))]
+                let force_avx2 = false;
 
                 unsafe {
                     // avx2+fma too: the AVX-512 kernel executes 256-bit
@@ -6775,6 +6777,7 @@ fn scan_with_luts(
                             &mut heap_sizes, &mut heap_mins, &mut heap_min_idxs,
                         );
                     } else if !force_scalar
+                        && !force_avx2
                         && is_x86_feature_detected!("avx512bw")
                         && is_x86_feature_detected!("avx512f")
                         && is_x86_feature_detected!("avx2")
@@ -7415,6 +7418,86 @@ mod gate_tests {
                     assert_eq!(a8[dst + r * 8 + j], pd.weights[q4 * 8 + 4 + slot], "even dim, oct {q8} row {r} j {j}");
                     assert_eq!(a8[dst + 16 + r * 8 + j], pd.weights[q4 * 8 + slot], "odd dim, oct {q8} row {r} j {j}");
                 }
+            }
+        }
+    }
+}
+
+/// Parity check for the `ndarray::simd` AVX2 kernel.
+///
+/// On an AVX-512 host the runtime dispatch never reaches
+/// `search_multi_query_avx2`, so this forces it via [`FORCE_AVX2_PATH`] and
+/// asserts its top-k matches the default kernel, which shares the same
+/// SUB-trick scoring and f32 FMA flush. The switch only reaches the classic
+/// layout, so on a host that picks the vector-major layout the test needs
+/// `TURBOVEC_NO_VECTOR_MAJOR=1` and otherwise returns early.
+#[cfg(all(test, target_arch = "x86_64"))]
+mod avx2_ndarray_simd_parity {
+    use super::{FORCE_AVX2_PATH, FORCE_SCALAR_FALLBACK, SCALAR_FALLBACK_GATE};
+    use crate::TurboQuantIndex;
+    use std::collections::BTreeSet;
+    use std::sync::atomic::Ordering;
+
+    fn unit_vectors(n: usize, dim: usize, seed: u64) -> Vec<f32> {
+        let mut s = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut out = vec![0.0f32; n * dim];
+        for row in out.chunks_mut(dim) {
+            let mut norm = 0.0f64;
+            for x in row.iter_mut() {
+                s = s
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                let v = ((s >> 33) as f64 / (1u64 << 31) as f64) - 1.0;
+                *x = v as f32;
+                norm += v * v;
+            }
+            let inv = 1.0 / (norm.sqrt() + 1e-9);
+            for x in row.iter_mut() {
+                *x = (*x as f64 * inv) as f32;
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn avx2_topk_matches_default_kernel() {
+        if !(is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma")) {
+            return;
+        }
+        if crate::pack::use_vector_major() {
+            eprintln!("skipped: vector-major layout active; rerun with TURBOVEC_NO_VECTOR_MAJOR=1");
+            return;
+        }
+        let _alone = SCALAR_FALLBACK_GATE.write().unwrap_or_else(|e| e.into_inner());
+        // (dim, n): one flush batch with whole blocks; then a dimension that
+        // needs two FLUSH_EVERY batches and an n that ends in a partial block.
+        for &(dim, n) in &[(256usize, 4096usize), (1024, 1000)] {
+            let (nq, k, bits) = (32usize, 10usize, 4usize);
+            let db = unit_vectors(n, dim, 11);
+            let queries = unit_vectors(nq, dim, 22);
+            let mut index = TurboQuantIndex::new(dim, bits).expect("index");
+            index.add(&db);
+            index.prepare();
+
+            FORCE_SCALAR_FALLBACK.store(false, Ordering::SeqCst);
+            FORCE_AVX2_PATH.store(false, Ordering::SeqCst);
+            let reference = index.search(&queries, k);
+
+            FORCE_AVX2_PATH.store(true, Ordering::SeqCst);
+            let avx2 = index.search(&queries, k);
+            FORCE_AVX2_PATH.store(false, Ordering::SeqCst);
+
+            for qi in 0..nq {
+                let r: BTreeSet<i64> = reference.indices[qi * k..(qi + 1) * k].iter().copied().collect();
+                let a: BTreeSet<i64> = avx2.indices[qi * k..(qi + 1) * k].iter().copied().collect();
+                assert_eq!(a, r, "dim {dim}, query {qi}: ndarray::simd AVX2 top-k differs from the default kernel");
+                // Both kernels flush with the same fused multiply-add on the
+                // same integer sums, so the scores agree bit for bit.
+                let mut rs: Vec<u32> = reference.scores[qi * k..(qi + 1) * k].iter().map(|x| x.to_bits()).collect();
+                let mut as_: Vec<u32> = avx2.scores[qi * k..(qi + 1) * k].iter().map(|x| x.to_bits()).collect();
+                rs.sort_unstable();
+                as_.sort_unstable();
+                assert_eq!(as_, rs, "dim {dim}, query {qi}: scores differ bitwise");
             }
         }
     }

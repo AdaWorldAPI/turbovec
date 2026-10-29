@@ -1,0 +1,5 @@
+[toolchain]
+# Pinned to match the AdaWorldAPI ndarray fork that turbovec depends on (see
+# turbovec/Cargo.toml), which requires rustc 1.99. Bump in lockstep with it.
+channel = "1.99.0"
+components = ["clippy", "rustfmt"]
