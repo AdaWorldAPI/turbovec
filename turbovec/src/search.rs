@@ -7431,7 +7431,8 @@ mod gate_tests {
 /// SUB-trick scoring and f32 FMA flush. The switch only reaches the classic
 /// layout, so on a host that picks the vector-major layout the test needs
 /// `TURBOVEC_NO_VECTOR_MAJOR=1` and otherwise returns early.
-#[cfg(all(test, target_arch = "x86_64"))]
+#[cfg(test)]
+#[cfg(target_arch = "x86_64")]
 mod avx2_ndarray_simd_parity {
     use super::{FORCE_AVX2_PATH, FORCE_SCALAR_FALLBACK, SCALAR_FALLBACK_GATE};
     use crate::TurboQuantIndex;
@@ -7507,7 +7508,8 @@ mod avx2_ndarray_simd_parity {
 /// LUTs and checks it against a scalar reference that reads the same layout.
 /// Unlike `avx2_ndarray_simd_parity` it builds no index, so it does not
 /// depend on which code layout this host picks.
-#[cfg(all(test, target_arch = "x86_64"))]
+#[cfg(test)]
+#[cfg(target_arch = "x86_64")]
 mod avx2_kernel_reference {
     use super::search_multi_query_avx2;
     use crate::{BLOCK, FLUSH_EVERY};
