@@ -80,3 +80,41 @@ References:
 - https://github.com/AdaWorldAPI/ndarray/blob/master/src/hpc/codec9.rs
 - https://github.com/AdaWorldAPI/ndarray/blob/master/src/hpc/edge_codec.rs
 - https://github.com/AdaWorldAPI/lance-graph/tree/main/crates/lance-graph-nsl
+
+## First measured graph-selection results (GitHub Actions, 2026-10-29)
+
+CI run: https://github.com/AdaWorldAPI/turbovec/actions/runs/40880844314
+(`cargo test`: **5 passed**, all three graph noise cases executed).
+Dataset: 2048 vectors, 128-D, 64 queries, top-10, 4 explicit neighbors per
+query. Fixed seed. **None of these metrics are a training result.**
+
+| noise | path | f32-top10 recall | any graph-neighbor@10 | explicit graph-edge coverage@10 |
+|---:|---|---:|---:|---:|
+| 0.8 | f32 | 1.00000 | 1.00000 | 1.00000 |
+| | scalar i4 | 0.77812 | 1.00000 | 1.00000 |
+| | scalar i9 | 0.98125 | 1.00000 | 1.00000 |
+| | shipped i4 | 0.78437 | 1.00000 | 1.00000 |
+| 1.7 | f32 | 1.00000 | 0.89062 | 0.48438 |
+| | scalar i4 | 0.65469 | 0.87500 | 0.42578 |
+| | scalar i9 | 0.97187 | 0.89062 | 0.47656 |
+| | shipped i4 | 0.66875 | 0.87500 | 0.42969 |
+| 2.5 | f32 | 1.00000 | 0.18750 | 0.06250 |
+| | scalar i4 | 0.67969 | 0.23438 | 0.06641 |
+| | scalar i9 | 0.97031 | 0.20312 | 0.07031 |
+| | shipped i4 | 0.67813 | 0.23438 | 0.06641 |
+
+**What this actually falsifies:** high f32-neighbor recall is *not*
+equivalent to high semantic graph-edge recall. At noise=0.8 all paths
+retrieve all four ground-truth neighbors despite large i4/f32 top-k
+differences. At noise=2.5, i4 sometimes hits more explicit graph labels
+than f32 by approximation noise; `f32` is a vector-similarity oracle
+and **not a semantic upper bound**. At noise=1.7, i9 improves explicit
+edge coverage by 0.05078 absolute over scalar i4, but the any-positive
+rate improves by only 0.01562.
+
+**Cost qualification:** the 9-bit scalar scan is about 2x the
+4-bit scalar scan, with 2.25x the vector payload; shipped i4 is much
+faster due to a different SIMD/calibration implementation. Absolute
+times are GitHub-runner-dependent. Do not promote U9 for NSL on this
+sample; next evaluate task labels, graph regularization, gradient
+fidelity, and actual training accuracy on realistic graph data.
