@@ -66,6 +66,15 @@ pub(crate) fn codebook(bits: usize, dim: usize) -> (Vec<f32>, Vec<f32>) {
 }
 
 
+/// Experimental 9-bit access to the *same* Lloyd-Max solver as production.
+/// Feature-gated: no change to the 2/3/4-bit TurboQuantIndex API or wire format.
+/// 512 numeric centroid IDs here are NOT ndarray Codec9 P×M values.
+#[cfg(feature = "turbovec9-lab")]
+pub fn lab_codebook9(dim: usize) -> (Vec<f32>, Vec<f32>) {
+    assert!(dim >= 8 && dim % 8 == 0 && dim <= crate::MAX_DIM);
+    codebook(9, dim)
+}
+
 fn lloyd_max(bits: usize, dim: usize, max_iter: usize, tol: f64) -> (Vec<f32>, Vec<f32>) {
     let a = (dim as f64 - 1.0) / 2.0;
     // Beta(a, a) on [0, 1], shifted to [-1, 1] via loc=-1, scale=2

@@ -65,6 +65,9 @@ rand_chacha = "=0.3.1"
 statrs = "=0.17.1"
 
 [features]
+# Deliberately isolated 9-bit Lloyd-Max scalar probe; never enables
+# 9-bit codes in production indexes or the on-disk format.
+turbovec9-lab = []
 # Debug/test telemetry: count 32-vector blocks short-circuited by the
 # slot-mask early exit. Off by default — the per-skip atomic RMW on a
 # shared cache line serializes the masked search hot loop (#294).
@@ -74,3 +77,8 @@ mask-skip-counter = []
 # Self dev-dependency so `cargo test` still exercises the block-skip
 # activation test without the counter existing in release builds.
 turbovec = { path = ".", features = ["mask-skip-counter"] }
+
+[[example]]
+name = "turbovec9_probe"
+required-features = ["turbovec9-lab"]
+test = true
