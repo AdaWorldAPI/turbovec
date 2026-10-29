@@ -47,3 +47,7 @@ bench-internals = []
 name = "kernel_speed"
 required-features = ["bench-internals"]
 
+# Explicit opt-in lab example; runs under cargo test as a gate.
+[[example]]
+name = "turbovec9_probe"
+test = true
